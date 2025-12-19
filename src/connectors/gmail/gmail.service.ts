@@ -46,12 +46,110 @@ export class GmailService {
         return details;
     }
 
-    async sendReply(coachRefreshToken: string, threadId: string, text: string) {
+    async sendReply(coachRefreshToken: string, threadId: string, text: string, recipientEmail: string, subject: string) {
         const gmail = await this.getAuthenticatedClient(coachRefreshToken);
-        // Implementation of creating MIME message and sending
-        // Stubbed for brevity in this step
-        console.log(`Sending reply to thread ${threadId}: ${text}`);
+
+        // Dev Safety Check
+        const isProd = process.env.NODE_ENV === 'production';
+        const finalRecipient = isProd ? recipientEmail : 'squashdaddytestreply@gmail.com';
+
+        console.log(`Sending reply to ${finalRecipient} (Original: ${recipientEmail}) [Dev Safe: ${!isProd}]`);
+
+        const message = [
+            'Content-Type: text/plain; charset="UTF-8"\n',
+            'MIME-Version: 1.0\n',
+            'Content-Transfer-Encoding: 7bit\n',
+            `to: ${finalRecipient}\n`,
+            `subject: Re: ${subject}\n`,
+            '\n',
+            text
+        ].join('');
+
+        const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+        await gmail.users.messages.send({
+            userId: 'me',
+            requestBody: {
+                raw: encodedMessage,
+                threadId: threadId
+            }
+        });
+
         return { sent: true };
+    }
+
+    async createDraft(coachRefreshToken: string, threadId: string, text: string, recipientEmail: string, subject: string) {
+        const gmail = await this.getAuthenticatedClient(coachRefreshToken);
+
+        // Drafts should also respect dev safety to avoid accidental sends if manually approved? 
+        // Actually drafts are safe, but let's keep it consistent or use real recipient for draft so coach sees real person?
+        // Let's use real recipient for drafts so coach knows who it's for, as it's not sent yet.
+
+        const message = [
+            'Content-Type: text/plain; charset="UTF-8"\n',
+            'MIME-Version: 1.0\n',
+            'Content-Transfer-Encoding: 7bit\n',
+            `to: ${recipientEmail}\n`,
+            `subject: Re: ${subject}\n`,
+            '\n',
+            text
+        ].join('');
+
+        const encodedMessage = Buffer.from(message).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+        await gmail.users.drafts.create({
+            userId: 'me',
+            requestBody: {
+                message: {
+                    raw: encodedMessage,
+                    threadId: threadId
+                }
+            }
+        });
+
+        return { created: true };
+    }
+
+    async addLabels(coachRefreshToken: string, threadId: string, labelNames: string[]) {
+        const gmail = await this.getAuthenticatedClient(coachRefreshToken);
+
+        // 1. Get existing labels to find IDs
+        const res = await gmail.users.labels.list({ userId: 'me' });
+        const existingLabels = res.data.labels || [];
+        const labelIdsToAdd: string[] = [];
+
+        for (const name of labelNames) {
+            let label = existingLabels.find(l => l.name === name);
+
+            // Create if not exists
+            if (!label) {
+                try {
+                    const newLabel = await gmail.users.labels.create({
+                        userId: 'me',
+                        requestBody: {
+                            name: name,
+                            labelListVisibility: 'labelShow',
+                            messageListVisibility: 'show'
+                        }
+                    });
+                    if (newLabel.data.id) labelIdsToAdd.push(newLabel.data.id);
+                } catch (e) {
+                    console.error(`Failed to create label ${name}`, e);
+                }
+            } else {
+                if (label.id) labelIdsToAdd.push(label.id);
+            }
+        }
+
+        if (labelIdsToAdd.length > 0) {
+            await gmail.users.threads.modify({
+                userId: 'me',
+                id: threadId,
+                requestBody: {
+                    addLabelIds: labelIdsToAdd
+                }
+            });
+        }
     }
 
     async getUnreadThreads(refreshToken: string) {

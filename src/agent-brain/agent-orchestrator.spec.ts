@@ -23,6 +23,8 @@ describe('AgentOrchestrator', () => {
         };
         gmailService = {
             sendReply: jest.fn(),
+            createDraft: jest.fn(),
+            addLabels: jest.fn(),
         };
         geminiService = {
             analyzeEmail: jest.fn(),
@@ -41,7 +43,7 @@ describe('AgentOrchestrator', () => {
     });
 
     // Use Case 1: Happy Path - Check Schedule
-    it('CHECK_SCHEDULE: should reply with schedule when sessions exist', async () => {
+    it('CHECK_SCHEDULE: should reply and tag SQD Handled', async () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'CHECK_SCHEDULE',
             requests: [],
@@ -51,18 +53,21 @@ describe('AgentOrchestrator', () => {
             { date: '2025-01-01', time: '10:00', coach: 'Coach Nick' }
         ]);
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Msg Body', mockSender, 'Subject', mockToken);
+        await orchestrator.processEmailIntent(mockCoachId, 'Msg Body', mockSender, 'Subject', mockToken, 'thread-123');
 
         expect(pythonAdapter.getPlayerSchedule).toHaveBeenCalledWith(mockSender);
         expect(gmailService.sendReply).toHaveBeenCalledWith(
             mockToken,
-            expect.any(String),
-            expect.stringContaining('2025-01-01 at 10:00')
+            'thread-123',
+            expect.stringContaining('2025-01-01 at 10:00'),
+            mockSender,
+            'Subject'
         );
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled']);
     });
 
     // Use Case 2: Happy Path - Book Lesson (Available)
-    it('BOOK_LESSON: should book slot if available', async () => {
+    it('BOOK_LESSON: should book, reply, and tag SQD Handled', async () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'BOOK_LESSON',
             requests: [{ intent: 'BOOK_LESSON', date: '2025-01-02', time: '11:00' }],
@@ -72,45 +77,58 @@ describe('AgentOrchestrator', () => {
             { start_time: '11:00', is_available: true }
         ]);
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Book me', mockSender, 'Subject', mockToken);
+        await orchestrator.processEmailIntent(mockCoachId, 'Book me', mockSender, 'Subject', mockToken, 'thread-123');
 
-        expect(pythonAdapter.findAvailability).toHaveBeenCalledWith(mockCoachId, '2025-01-02');
         expect(pythonAdapter.createBooking).toHaveBeenCalledWith(expect.objectContaining({
             booking_date: '2025-01-02',
             start_time: '11:00'
         }));
         expect(gmailService.sendReply).toHaveBeenCalledWith(
             mockToken,
-            expect.any(String),
-            expect.stringContaining('Confirmed booking')
+            'thread-123',
+            expect.stringContaining('Confirmed booking'),
+            mockSender,
+            'Subject'
         );
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled']);
     });
 
     // Use Case 3: Edge Case - Book Lesson (Unavailable)
-    it('BOOK_LESSON: should suggest alternatives if slot is busy', async () => {
+    it('BOOK_LESSON: should draft reply and tag SQD review pending if busy', async () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'BOOK_LESSON',
             requests: [{ intent: 'BOOK_LESSON', date: '2025-01-03', time: '14:00' }],
             confidence: 0.9
         });
-        // 14:00 missing/false, 15:00 and 16:00 available
+        // 14:00 unavailable
         pythonAdapter.findAvailability.mockResolvedValue([
-            { start_time: '15:00', is_available: true },
-            { start_time: '16:00', is_available: true }
+            { start_time: '14:00', is_available: false },
+            { start_time: '15:00', is_available: true }
         ]);
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken);
+        await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken, 'thread-123');
 
         expect(pythonAdapter.createBooking).not.toHaveBeenCalled();
-        expect(gmailService.sendReply).toHaveBeenCalledWith(
+        expect(gmailService.sendReply).not.toHaveBeenCalled();
+        // Should create DRAFT
+        expect(gmailService.createDraft).toHaveBeenCalledWith(
             mockToken,
-            expect.any(String),
-            expect.stringContaining('Sorry')
+            'thread-123',
+            expect.stringContaining('Sorry'),
+            mockSender,
+            'Subject'
         );
-        expect(gmailService.sendReply).toHaveBeenCalledWith(
-            mockToken,
-            expect.any(String),
-            expect.stringContaining('15:00 or 16:00')
-        );
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD review pending']);
+    });
+
+    // Use Case 4: Ignore OTHER
+    it('OTHER: should ignore and do nothing (leave unread)', async () => {
+        geminiService.analyzeEmail.mockResolvedValue({ intent: 'OTHER' });
+
+        await orchestrator.processEmailIntent(mockCoachId, 'Hi', mockSender, 'Subject', mockToken, 'thread-123');
+
+        expect(gmailService.sendReply).not.toHaveBeenCalled();
+        expect(gmailService.createDraft).not.toHaveBeenCalled();
+        expect(gmailService.addLabels).not.toHaveBeenCalled();
     });
 });

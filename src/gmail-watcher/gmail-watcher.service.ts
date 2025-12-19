@@ -69,7 +69,8 @@ export class GmailWatcherService {
                     lastMsg.snippet, // TODO: Get full body
                     fromHeader.value,
                     subjectHeader ? subjectHeader.value : 'No Subject',
-                    refreshToken
+                    refreshToken,
+                    thread.id
                 );
             }
 
