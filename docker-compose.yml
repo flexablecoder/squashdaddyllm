@@ -1,0 +1,47 @@
+services:
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.agent
+    container_name: agent_service
+    depends_on:
+      - mongo
+      - redis
+    environment:
+      MONGO_URI: mongodb://mongo:27017/squashdaddy_agent
+      REDIS_HOST: redis
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      GOOGLE_CREDENTIALS: ${GOOGLE_CREDENTIALS}
+    ports:
+      - "3000:3000"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    command: npm run start:dev
+    networks:
+      - agent-network
+
+  mongo:
+    image: mongo:latest
+    container_name: agent_mongo
+    ports:
+      - "27018:27017" # Mapped to 27018 to avoid conflict with local mongo
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - agent-network
+
+  redis:
+    image: redis:alpine
+    container_name: agent_redis
+    ports:
+      - "6380:6379" # Mapped to 6380 to avoid conflict with local redis
+    networks:
+      - agent-network
+
+networks:
+  agent-network:
+    driver: bridge
+
+volumes:
+  mongo_data:
