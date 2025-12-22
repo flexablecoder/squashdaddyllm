@@ -2,23 +2,31 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 
 @Injectable()
 export class GmailService {
-    private oAuth2Client: OAuth2Client;
+    constructor(private configService: ConfigService) { }
 
-    constructor(private configService: ConfigService) {
-        this.oAuth2Client = new google.auth.OAuth2(
-            this.configService.get('GMAIL_CLIENT_ID'),
-            this.configService.get('GMAIL_CLIENT_SECRET'),
-            // Redirect URL not needed for service-level usage usually
+    /**
+     * Create an OAuth2 client with the provided credentials
+     * This allows each coach to have their own OAuth client with their specific credentials
+     */
+    private createOAuth2Client(clientId: string, clientSecret: string) {
+        return new google.auth.OAuth2(
+            clientId,
+            clientSecret,
+            // Redirect URL not needed for service-level usage
         );
     }
 
-    async getAuthenticatedClient(refreshToken: string) {
-        this.oAuth2Client.setCredentials({ refresh_token: refreshToken });
-        return google.gmail({ version: 'v1', auth: this.oAuth2Client });
+    async getAuthenticatedClient(refreshToken: string, clientId?: string, clientSecret?: string) {
+        // Use provided credentials or fall back to environment variables (for backwards compatibility)
+        const effectiveClientId = clientId || this.configService.get('GMAIL_CLIENT_ID');
+        const effectiveClientSecret = clientSecret || this.configService.get('GMAIL_CLIENT_SECRET');
+
+        const oAuth2Client = this.createOAuth2Client(effectiveClientId, effectiveClientSecret);
+        oAuth2Client.setCredentials({ refresh_token: refreshToken });
+        return google.gmail({ version: 'v1', auth: oAuth2Client });
     }
 
     async fetchUnreadMessages(coachRefreshToken: string, query: string) {
@@ -152,8 +160,8 @@ export class GmailService {
         }
     }
 
-    async getUnreadThreads(refreshToken: string) {
-        const gmail = await this.getAuthenticatedClient(refreshToken);
+    async getUnreadThreads(refreshToken: string, clientId?: string, clientSecret?: string) {
+        const gmail = await this.getAuthenticatedClient(refreshToken, clientId, clientSecret);
 
         // List threads with unread messages
         const res = await gmail.users.threads.list({

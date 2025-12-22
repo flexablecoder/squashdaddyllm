@@ -27,7 +27,10 @@ export class GeminiService {
             this.logger.warn('GEMINI_API_KEY not found in configuration');
         } else {
             this.genAI = new GoogleGenerativeAI(apiKey);
-            this.model = this.genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+            // Model name is configurable via GEMINI_MODEL env var
+            const modelName = this.configService.get<string>('GEMINI_MODEL', 'gemini-flash-latest');
+            this.logger.log(`Initializing Gemini model: ${modelName}`);
+            this.model = this.genAI.getGenerativeModel({ model: modelName });
         }
     }
 

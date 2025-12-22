@@ -1,12 +1,11 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { google } from 'googleapis';
-import { OAuth2Client } from 'google-auth-library';
 
 @Injectable()
 export class GoogleAuthService {
     private readonly logger = new Logger(GoogleAuthService.name);
-    private oAuth2Client: OAuth2Client;
+    private oAuth2Client: InstanceType<typeof google.auth.OAuth2>;
 
     constructor(private readonly configService: ConfigService) {
         const clientId = this.configService.get<string>('GMAIL_CLIENT_ID');
@@ -49,7 +48,7 @@ export class GoogleAuthService {
      * @param code - Authorization code from Google callback
      * @returns Token response containing access_token, refresh_token, etc.
      */
-    async exchangeCodeForTokens(code: string) {
+    async exchangeCodeForTokens(code: string): Promise<{ [key: string]: any }> {
         try {
             const { tokens } = await this.oAuth2Client.getToken(code);
             this.logger.log('Successfully exchanged code for tokens');

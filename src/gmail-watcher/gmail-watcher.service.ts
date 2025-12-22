@@ -40,15 +40,19 @@ export class GmailWatcherService {
             this.logger.debug(`Checking inbox for coach ${email} (${coachId})`);
 
             // 3. Fetch Unread
-            const credentials = coach.agent_config?.gmail_credentials;
+            const credentials = coach.gmail_credentials; // Python endpoint returns credentials at root level
             if (!credentials || !credentials.refresh_token) {
                 this.logger.warn(`No Gmail credentials for coach ${email}`);
-                // return; 
+                return; // Skip if no credentials
             }
 
-            // Using GmailService to fetch unread threads
-            const refreshToken = credentials?.refresh_token || 'MOCK_TOKEN'; // Fallback for dev
-            const threads = await this.gmailService.getUnreadThreads(refreshToken);
+            // Extract OAuth credentials
+            const refreshToken = credentials.refresh_token;
+            const clientId = credentials.client_id;
+            const clientSecret = credentials.client_secret;
+
+            // Using GmailService to fetch unread threads with coach-specific credentials
+            const threads = await this.gmailService.getUnreadThreads(refreshToken, clientId, clientSecret);
 
             for (const thread of threads) {
                 // Process only the last message for now
