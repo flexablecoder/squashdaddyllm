@@ -95,6 +95,18 @@ export class PythonApiAdapter implements IBookingSystem {
         return { id: 'player_123', email: email, name: 'Player One' };
     }
 
+    async saveGmailIntegration(coachId: string, refreshToken: string): Promise<void> {
+        try {
+            await firstValueFrom(
+                this.httpService.patch(`${this.baseUrl}/api/coaches/${coachId}/integrations`, {
+                    gmail_refresh_token: refreshToken,
+                })
+            );
+        } catch (error) {
+            this.handleError(error);
+        }
+    }
+
     private handleError(error: any) {
         if (error.response) {
             throw new HttpException(

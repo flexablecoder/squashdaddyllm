@@ -8,6 +8,7 @@ import { GmailWatcherModule } from './gmail-watcher/gmail-watcher.module';
 import { BookingsModule } from './bookings/bookings.module';
 import { AgentBrainModule } from './agent-brain/agent-brain.module';
 import { CalendarSyncModule } from './calendar-sync/calendar-sync.module';
+import { AuthModule } from './auth/auth.module';
 
 import { AgentOrchestrator } from './agent-brain/agent-orchestrator.service';
 import { PythonApiAdapter } from './core/adapters/python-api.adapter';
@@ -38,6 +39,7 @@ import { CoachConfig, CoachConfigSchema } from './config/schemas/coach-config.sc
     BookingsModule,
     AgentBrainModule,
     CalendarSyncModule,
+    AuthModule,
   ],
   controllers: [AppController],
   providers: [AppService, AgentOrchestrator, PythonApiAdapter, GmailService],
