@@ -12,6 +12,8 @@ services:
       PYTHON_API_URL: http://host.docker.internal:8000
       GEMINI_API_KEY: ${GEMINI_API_KEY}
       GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
+      API_CLIENT_ID: ${API_CLIENT_ID:-agent_service_client}
+      API_CLIENT_SECRET: ${API_CLIENT_SECRET}
     ports:
       - "3001:3001"
     volumes:

@@ -15,8 +15,18 @@ export class AgentOrchestrator {
         private readonly geminiService: GeminiService
     ) { }
 
-    async processEmailIntent(coachId: string, emailContent: string, sender: string, subject: string, refreshToken: string, threadId: string) {
+    async processEmailIntent(
+        coachId: string,
+        emailContent: string,
+        sender: string,
+        subject: string,
+        refreshToken: string,
+        threadId: string,
+        emailHandlingMode: 'draft_only' | 'send_full_replies',
+        adminOverride: { enabled: boolean; email: string } | null
+    ) {
         this.logger.log(`Processing intent for Coach ${coachId} from ${sender}`);
+        this.logger.log(`Email handling mode: ${emailHandlingMode}, Admin override: ${adminOverride?.enabled || false}`);
 
         // 1. Analyze with Gemini
         const analysis = await this.geminiService.analyzeEmail(subject, emailContent, sender);
@@ -73,10 +83,6 @@ export class AgentOrchestrator {
                             const altText = alternatives.map(s => s.start_time).join(' or ');
                             const failMsg = `Sorry, ${req.time} is not available on ${req.date}.` + (altText ? ` Try: ${altText}` : '');
 
-                            // If booking fails, we draft a response instead of sending? 
-                            // Or send the "Sorry" message? 
-                            // Requirement says: "IF the llm is not able to successfully handle the email... draft a response... tag SQD review pending"
-                            // A failed booking is a partial failure. Let's draft it for review so coach can manually override or call.
                             replyText = replyText ? `${replyText}\n\n${failMsg}` : failMsg;
                             success = false;
                         }
@@ -84,16 +90,57 @@ export class AgentOrchestrator {
                 }
             }
 
-            // 4. Send or Draft based on success
+            // 4. Determine recipient based on admin override
+            const recipientEmail = adminOverride?.enabled && adminOverride.email
+                ? adminOverride.email
+                : sender;
+            const originalSender = adminOverride?.enabled ? sender : undefined;
+
+            // Get coach email for logging
+            const coachEmail = await this.pythonAdapter.getCoachEmail(coachId);
+
+            // 5. Send or Draft based on email handling mode (not success)
             if (replyText) {
-                if (success) {
-                    await this.gmailService.sendReply(refreshToken, threadId, replyText, sender, subject);
+                if (emailHandlingMode === 'send_full_replies') {
+                    // Send the reply
+                    await this.gmailService.sendReply(refreshToken, threadId, replyText, recipientEmail, subject);
                     await this.gmailService.addLabels(refreshToken, threadId, ['SQD Handled']);
-                    this.logger.log(`Sent reply to ${sender} and tagged 'SQD Handled'`);
+
+                    // Log the sent email
+                    await this.pythonAdapter.logEmail({
+                        coach_id: coachId,
+                        coach_email: coachEmail,
+                        recipient_email: recipientEmail,
+                        original_sender: originalSender,
+                        subject: subject,
+                        body: replyText,
+                        email_type: 'sent',
+                        handling_mode: emailHandlingMode,
+                        admin_override_active: adminOverride?.enabled || false,
+                        thread_id: threadId,
+                    });
+
+                    this.logger.log(`[ACTION: SENT] Sent reply to ${recipientEmail}`);
                 } else {
-                    await this.gmailService.createDraft(refreshToken, threadId, replyText, sender, subject);
+                    // Draft only mode
+                    await this.gmailService.createDraft(refreshToken, threadId, replyText, recipientEmail, subject);
                     await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending']);
-                    this.logger.log(`Created draft for ${sender} and tagged 'SQD review pending'`);
+
+                    // Log the drafted email
+                    await this.pythonAdapter.logEmail({
+                        coach_id: coachId,
+                        coach_email: coachEmail,
+                        recipient_email: recipientEmail,
+                        original_sender: originalSender,
+                        subject: subject,
+                        body: replyText,
+                        email_type: 'drafted',
+                        handling_mode: emailHandlingMode,
+                        admin_override_active: adminOverride?.enabled || false,
+                        thread_id: threadId,
+                    });
+
+                    this.logger.log(`[ACTION: DRAFT] Created draft for ${recipientEmail}`);
                 }
             }
 
