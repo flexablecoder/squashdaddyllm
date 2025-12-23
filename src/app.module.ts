@@ -27,12 +27,24 @@ import { CoachConfig, CoachConfigSchema } from './config/schemas/coach-config.sc
     MongooseModule.forFeature([{ name: CoachConfig.name, schema: CoachConfigSchema }]),
     BullModule.forRootAsync({
       imports: [ConfigModule],
-      useFactory: async (configService: ConfigService) => ({
-        connection: {
-          host: configService.get('REDIS_HOST'),
-          port: 6379,
-        },
-      }),
+      useFactory: async (configService: ConfigService) => {
+        const redisUrl = configService.get<string>('REDIS_URL');
+        if (redisUrl) {
+          return {
+            connection: {
+              url: redisUrl,
+            },
+          };
+        }
+
+        return {
+          connection: {
+            host: configService.get<string>('REDIS_HOST') || 'localhost',
+            port: configService.get<number>('REDIS_PORT') || 6379,
+            password: configService.get<string>('REDIS_PASSWORD'),
+          },
+        };
+      },
       inject: [ConfigService],
     }),
     GmailWatcherModule,
