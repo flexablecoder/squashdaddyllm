@@ -29,20 +29,39 @@ import { CoachConfig, CoachConfigSchema } from './config/schemas/coach-config.sc
       imports: [ConfigModule],
       useFactory: async (configService: ConfigService) => {
         const redisUrl = configService.get<string>('REDIS_URL');
+        let connection: any = {
+          host: configService.get<string>('REDIS_HOST') || 'localhost',
+          port: configService.get<number>('REDIS_PORT') || 6379,
+          password: configService.get<string>('REDIS_PASSWORD'),
+        };
+
         if (redisUrl) {
-          return {
-            connection: {
-              url: redisUrl,
-            },
-          };
+          try {
+            const parsedUrl = new URL(redisUrl);
+            console.log('Parsing REDIS_URL. Protocol:', parsedUrl.protocol);
+            connection = {
+              host: parsedUrl.hostname,
+              port: parseInt(parsedUrl.port),
+              username: parsedUrl.username,
+              password: parsedUrl.password,
+            };
+            if (parsedUrl.protocol === 'rediss:') {
+              connection.tls = { rejectUnauthorized: false };
+            }
+          } catch (e) {
+            console.error('Invalid REDIS_URL, falling back to individual params', e);
+          }
         }
 
+        console.log('Redis Connection Config:', {
+          host: connection.host,
+          port: connection.port,
+          hasPassword: !!connection.password,
+          tls: !!connection.tls
+        });
+
         return {
-          connection: {
-            host: configService.get<string>('REDIS_HOST') || 'localhost',
-            port: configService.get<number>('REDIS_PORT') || 6379,
-            password: configService.get<string>('REDIS_PASSWORD'),
-          },
+          connection,
         };
       },
       inject: [ConfigService],
