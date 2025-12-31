@@ -103,7 +103,9 @@ export class GmailWatcherService {
                     refreshToken,
                     thread.id,
                     emailHandlingMode as 'draft_only' | 'send_full_replies',
-                    adminOverride
+                    adminOverride,
+                    clientId,
+                    clientSecret
                 );
 
                 stats.processed++;

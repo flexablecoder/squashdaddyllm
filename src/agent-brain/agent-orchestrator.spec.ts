@@ -20,6 +20,7 @@ describe('AgentOrchestrator', () => {
             getPlayerSchedule: jest.fn(),
             findAvailability: jest.fn(),
             createBooking: jest.fn(),
+            findPlayerByEmail: jest.fn(),
         };
         gmailService = {
             sendReply: jest.fn(),
@@ -47,15 +48,18 @@ describe('AgentOrchestrator', () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'CHECK_SCHEDULE',
             requests: [],
+            skills_identified: ['schedule-information'],
             confidence: 0.95
         });
         pythonAdapter.getPlayerSchedule.mockResolvedValue([
             { date: '2025-01-01', time: '10:00', coach: 'Coach Nick' }
         ]);
+        pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender });
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Msg Body', mockSender, 'Subject', mockToken, 'thread-123');
+        await orchestrator.processEmailIntent(mockCoachId, 'Msg Body', mockSender, 'Subject', mockToken, 'thread-123', 'send_full_replies', null);
 
-        expect(pythonAdapter.getPlayerSchedule).toHaveBeenCalledWith(mockSender);
+        expect(pythonAdapter.findPlayerByEmail).toHaveBeenCalledWith(mockCoachId, mockSender);
+        expect(geminiService.analyzeEmail).toHaveBeenCalledWith('Subject', 'Msg Body', mockSender, mockCoachId, 'player_123');
         expect(gmailService.sendReply).toHaveBeenCalledWith(
             mockToken,
             'thread-123',
@@ -63,7 +67,7 @@ describe('AgentOrchestrator', () => {
             mockSender,
             'Subject'
         );
-        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled']);
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled', 'sqd-read'], undefined, undefined);
     });
 
     // Use Case 2: Happy Path - Book Lesson (Available)
@@ -71,13 +75,17 @@ describe('AgentOrchestrator', () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'BOOK_LESSON',
             requests: [{ intent: 'BOOK_LESSON', date: '2025-01-02', time: '11:00' }],
+            skills_identified: ['schedule-training'],
             confidence: 0.9
         });
         pythonAdapter.findAvailability.mockResolvedValue([
             { start_time: '11:00', is_available: true }
         ]);
+        pythonAdapter.findPlayerByEmail.mockResolvedValue(null); // No player found case
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Book me', mockSender, 'Subject', mockToken, 'thread-123');
+        await orchestrator.processEmailIntent(mockCoachId, 'Book me', mockSender, 'Subject', mockToken, 'thread-123', 'send_full_replies', null);
+        
+        expect(geminiService.analyzeEmail).toHaveBeenCalledWith('Subject', 'Book me', mockSender, mockCoachId, undefined);
 
         expect(pythonAdapter.createBooking).toHaveBeenCalledWith(expect.objectContaining({
             booking_date: '2025-01-02',
@@ -90,7 +98,7 @@ describe('AgentOrchestrator', () => {
             mockSender,
             'Subject'
         );
-        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled']);
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD Handled', 'sqd-read'], undefined, undefined);
     });
 
     // Use Case 3: Edge Case - Book Lesson (Unavailable)
@@ -98,6 +106,7 @@ describe('AgentOrchestrator', () => {
         geminiService.analyzeEmail.mockResolvedValue({
             intent: 'BOOK_LESSON',
             requests: [{ intent: 'BOOK_LESSON', date: '2025-01-03', time: '14:00' }],
+            skills_identified: ['schedule-training'],
             confidence: 0.9
         });
         // 14:00 unavailable
@@ -106,7 +115,9 @@ describe('AgentOrchestrator', () => {
             { start_time: '15:00', is_available: true }
         ]);
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken, 'thread-123');
+        await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken, 'thread-123', 'draft_only', null);
+
+        expect(pythonAdapter.findAvailability).toHaveBeenCalled();
 
         expect(pythonAdapter.createBooking).not.toHaveBeenCalled();
         expect(gmailService.sendReply).not.toHaveBeenCalled();
@@ -118,17 +129,20 @@ describe('AgentOrchestrator', () => {
             mockSender,
             'Subject'
         );
-        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD review pending']);
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['SQD review pending', 'sqd-read'], undefined, undefined);
+        
+        // Verify injection identity
+        expect((gmailService as any)._marker).toBe('Injected');
     });
 
     // Use Case 4: Ignore OTHER
     it('OTHER: should ignore and do nothing (leave unread)', async () => {
-        geminiService.analyzeEmail.mockResolvedValue({ intent: 'OTHER' });
+        geminiService.analyzeEmail.mockResolvedValue({ intent: 'OTHER', skills_identified: [], requests: [], confidence: 0 });
 
-        await orchestrator.processEmailIntent(mockCoachId, 'Hi', mockSender, 'Subject', mockToken, 'thread-123');
+        await orchestrator.processEmailIntent(mockCoachId, 'Hi', mockSender, 'Subject', mockToken, 'thread-123', 'send_full_replies', null);
 
         expect(gmailService.sendReply).not.toHaveBeenCalled();
         expect(gmailService.createDraft).not.toHaveBeenCalled();
-        expect(gmailService.addLabels).not.toHaveBeenCalled();
+        expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['sqd-read'], undefined, undefined);
     });
 });

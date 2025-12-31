@@ -63,11 +63,14 @@ export class GeminiService {
         }
     }
 
-    async analyzeEmail(subject: string, body: string, senderEmail: string): Promise<AnalysisResult> {
+    async analyzeEmail(subject: string, body: string, senderEmail: string, coachId: string, playerId?: string): Promise<AnalysisResult> {
         if (!this.model) {
             this.logger.error('Gemini model not initialized');
             return { intent: 'OTHER', skills_identified: [], requests: [], confidence: 0 };
         }
+
+        this.logger.debug(`[Generic Analysis Input] Sender: ${senderEmail}, Subject: ${subject}, CoachId: ${coachId}, PlayerId: ${playerId}`);
+        this.logger.debug(`[Generic Analysis Body] ${body}`);
 
         const prompt = `
         You are an AI Scheduling Assistant for a Squash Coach (SquashDaddy).
@@ -75,6 +78,10 @@ export class GeminiService {
 
         AVAILABLE SKILLS:
         ${this.skillsIndex}
+
+        CONTEXT:
+        Coach ID: ${coachId}
+        Player ID: ${playerId || 'Unknown/New Player'}
 
         Analyze this email from a player (${senderEmail}).
 
@@ -118,6 +125,8 @@ export class GeminiService {
             "confidence": 0.0 to 1.0
         }
         `;
+
+        this.logger.debug(`[Gemini Prompt] ${prompt}`);
 
         try {
             const result = await this.model.generateContent({

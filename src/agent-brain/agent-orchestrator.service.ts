@@ -23,52 +23,82 @@ export class AgentOrchestrator {
         refreshToken: string,
         threadId: string,
         emailHandlingMode: 'draft_only' | 'send_full_replies',
-        adminOverride: { enabled: boolean; email: string } | null
+        adminOverride: { enabled: boolean; email: string } | null,
+        clientId?: string,
+        clientSecret?: string
     ) {
         this.logger.log(`Processing intent for Coach ${coachId} from ${sender}`);
         this.logger.log(`Email handling mode: ${emailHandlingMode}, Admin override: ${adminOverride?.enabled || false}`);
+        this.logger.log(`Email handling mode: ${emailHandlingMode}, Admin override: ${adminOverride?.enabled || false}`);
 
-        // 1. Analyze with Gemini
-        const analysis = await this.geminiService.analyzeEmail(subject, emailContent, sender);
+        // 0. Resolve Player ID from Sender Email
+        let playerId: string | undefined;
+        try {
+            const player = await this.pythonAdapter.findPlayerByEmail(coachId, sender);
+            if (player) {
+                playerId = player.id || player._id;
+                this.logger.log(`Resolved Player ID: ${playerId} for sender: ${sender}`);
+            } else {
+                this.logger.log(`No existing player found for sender: ${sender}`);
+            }
+        } catch (e) {
+            this.logger.warn(`Failed to lookup player for sender ${sender}`, e);
+        }
+
+            // 1. Analyze with Gemini
+        const analysis = await this.geminiService.analyzeEmail(subject, emailContent, sender, coachId, playerId);
+
+        this.logger.debug(`[LLM RAW ANALYSIS] ${JSON.stringify(analysis)}`);
+        this.logger.log(`[LLM DECISION] Intent: ${analysis.intent} | Skills: ${analysis.skills_identified.join(', ')} | Confidence: ${analysis.confidence}`);
 
         if (analysis.intent === 'OTHER') {
             this.logger.log(`Skipping email from ${sender} - Intent: OTHER`);
             // Requirement: Leave as unread. No action needed as we just don't reply/modify.
+            await this.gmailService.addLabels(refreshToken, threadId, ['sqd-read'], clientId, clientSecret);
             return;
         }
 
-        this.logger.log(`Detected Intent: ${analysis.intent} with confidence ${analysis.confidence}`);
-
-        let replyText = '';
+        let replyText = analysis.email_draft?.body || ''; // Default to LLM draft if valid
         let success = false;
 
         try {
             // 2. CHECK_SCHEDULE Logic
             if (analysis.intent === 'CHECK_SCHEDULE' || analysis.intent === 'MULTI_INTENT') {
+                this.logger.log(`[SKILL EXEC] Executing Check Schedule Logic`);
+                console.log(`[CHECK_SCHEDULE] Fetching schedule for ${sender}`);
                 const schedule = await this.pythonAdapter.getPlayerSchedule(sender);
                 const scheduleText = schedule.length > 0
                     ? schedule.map((s: any) => `- ${s.date} at ${s.time} with Coach ${s.coach}`).join('\n')
                     : 'You have no upcoming sessions scheduled.';
 
-                replyText = `Here is your schedule:\n${scheduleText}`;
+                // If intent was purely check schedule, override or append to draft
+                const scheduleMsg = `Here is your schedule details:\n${scheduleText}`;
+
+                // If we have a draft, we might want to check if it already has placeholders, 
+                // but for now, let's append the hard data if the LLM didn't have access to it.
+                // Or better: The prompt didn't have tools to get data yet, so the draft is likely just a confirmation.
+                // We append the real data.
+                replyText = replyText ? `${replyText}\n\n${scheduleMsg}` : `Here is your schedule:\n${scheduleText}`;
                 success = true;
             }
 
             // 3. BOOK_LESSON Logic
+        // 3. BOOK_LESSON Logic
             // If multi-intent, we append booking confirmation to schedule text
             if (analysis.intent === 'BOOK_LESSON' || analysis.intent === 'MULTI_INTENT') {
-                for (const req of analysis.requests) {
+                const requests = analysis.requests || [];
+                for (const req of requests) {
                     if (req.intent === 'BOOK_LESSON' && req.date && req.time) {
-                        this.logger.log(`Attempting booking for ${req.date} @ ${req.time}`);
+                        this.logger.log(`[SKILL EXEC] Executing Book Lesson Logic for ${req.date} @ ${req.time}`);
 
                         // Check availability
                         const slots = await this.pythonAdapter.findAvailability(coachId, req.date);
-                        const targetSlot = slots.find(s => s.start_time.startsWith(req.time) && s.is_available);
+                        const targetSlot = slots?.find(s => s.start_time.startsWith(req.time) && s.is_available);
 
                         if (targetSlot) {
                             await this.pythonAdapter.createBooking({
                                 coach_id: coachId,
-                                player_id: "determined-from-sender-email",
+                                player_id: playerId || "determined-from-sender-email", // Updated to use resolved ID
                                 booking_date: req.date,
                                 start_time: req.time,
                                 end_time: "calculated-end",
@@ -79,7 +109,7 @@ export class AgentOrchestrator {
                             success = true;
                         } else {
                             // Suggest alternatives
-                            const alternatives = slots.filter(s => s.is_available).slice(0, 2);
+                            const alternatives = slots ? slots.filter(s => s.is_available).slice(0, 2) : [];
                             const altText = alternatives.map(s => s.start_time).join(' or ');
                             const failMsg = `Sorry, ${req.time} is not available on ${req.date}.` + (altText ? ` Try: ${altText}` : '');
 
@@ -104,7 +134,7 @@ export class AgentOrchestrator {
                 if (emailHandlingMode === 'send_full_replies') {
                     // Send the reply
                     await this.gmailService.sendReply(refreshToken, threadId, replyText, recipientEmail, subject);
-                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD Handled']);
+                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD Handled', 'sqd-read'], clientId, clientSecret);
 
                     // Log the sent email
                     await this.pythonAdapter.logEmail({
@@ -124,7 +154,7 @@ export class AgentOrchestrator {
                 } else {
                     // Draft only mode
                     await this.gmailService.createDraft(refreshToken, threadId, replyText, recipientEmail, subject);
-                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending']);
+                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending', 'sqd-read'], clientId, clientSecret);
 
                     // Log the drafted email
                     await this.pythonAdapter.logEmail({
@@ -148,7 +178,7 @@ export class AgentOrchestrator {
             this.logger.error('Error executing agent actions', error);
             // On error, try to tag as review pending?
             try {
-                await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending']);
+                await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending', 'sqd-read'], clientId, clientSecret);
             } catch (e) { console.error('Failed to tag error email', e); }
         }
     }

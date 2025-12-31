@@ -118,8 +118,8 @@ export class GmailService {
         return { created: true };
     }
 
-    async addLabels(coachRefreshToken: string, threadId: string, labelNames: string[]) {
-        const gmail = await this.getAuthenticatedClient(coachRefreshToken);
+    async addLabels(coachRefreshToken: string, threadId: string, labelNames: string[], clientId?: string, clientSecret?: string) {
+        const gmail = await this.getAuthenticatedClient(coachRefreshToken, clientId, clientSecret);
 
         // 1. Get existing labels to find IDs
         const res = await gmail.users.labels.list({ userId: 'me' });
@@ -166,7 +166,7 @@ export class GmailService {
         // List threads with unread messages
         const res = await gmail.users.threads.list({
             userId: 'me',
-            q: 'is:unread',
+            q: 'is:unread -label:sqd-read',
         });
 
         const threadsList = res.data.threads || [];

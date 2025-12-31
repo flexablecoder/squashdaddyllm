@@ -1,5 +1,5 @@
 
-import { Injectable, HttpException, HttpStatus, OnModuleInit } from '@nestjs/common';
+import { Injectable, HttpException, HttpStatus, OnModuleInit, Logger } from '@nestjs/common';
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
@@ -14,6 +14,8 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
     private accessToken: string | null = null;
     private tokenExpiry: number = 0; // Timestamp when token expires
 
+    private readonly logger = new Logger(PythonApiAdapter.name);
+
     constructor(
         private readonly httpService: HttpService,
         private readonly configService: ConfigService,
@@ -22,7 +24,30 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
         this.apiClientId = this.configService.get<string>('API_CLIENT_ID', '');
         this.apiClientSecret = this.configService.get<string>('API_CLIENT_SECRET', '');
 
-        // Add request interceptor to attach token
+        // LOGGING INTERCEPTORS
+        this.httpService.axiosRef.interceptors.request.use(config => {
+            const { method, url, data } = config;
+            this.logger.debug(`[API REQ] ${method?.toUpperCase()} ${url} | Body: ${JSON.stringify(data || {})}`);
+            return config;
+        });
+
+        this.httpService.axiosRef.interceptors.response.use(
+            response => {
+                const { status, config, data } = response;
+                this.logger.debug(`[API RES] ${status} ${config.url} | Data: ${JSON.stringify(data || {}).substring(0, 500)}...`);
+                return response;
+            },
+            error => {
+                if (error.response) {
+                    this.logger.error(`[API ERR] ${error.response.status} ${error.config?.url} | Data: ${JSON.stringify(error.response.data)}`);
+                } else {
+                    this.logger.error(`[API ERR] Network/Other: ${error.message}`);
+                }
+                return Promise.reject(error);
+            }
+        );
+
+        // AUTH INTERCEPTORS (EXISTING)
         this.httpService.axiosRef.interceptors.request.use(async (config) => {
             // Skip auth for login endpoint to avoid loops
             if (config.url?.includes('/api/oauth/token')) {
@@ -149,8 +174,11 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
     async getAssignedPlayers(coachId: string): Promise<any[]> {
         try {
             await this.ensureAuthenticated();
+            // Pass user_id to filter players for this specific coach context
             const response = await firstValueFrom(
-                this.httpService.get(`${this.baseUrl}/api/coaches/me/players`)
+                this.httpService.get(`${this.baseUrl}/api/coaches/me/players`, {
+                    params: { user_id: coachId }
+                })
             );
             return response.data;
         } catch (error) {
@@ -178,8 +206,15 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
         ];
     }
 
-    async findPlayerByEmail(email: string): Promise<any> {
-        return { id: 'player_123', email: email, name: 'Player One' };
+    async findPlayerByEmail(coachId: string, email: string): Promise<any> {
+        try {
+            const players = await this.getAssignedPlayers(coachId);
+            const player = players.find(p => p.email.toLowerCase() === email.toLowerCase());
+            return player || null;
+        } catch (error) {
+            this.logger.warn(`Failed to find player by email ${email} for coach ${coachId}`, error);
+            return null;
+        }
     }
 
     async saveGmailIntegration(coachId: string, refreshToken: string): Promise<void> {
