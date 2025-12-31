@@ -29,39 +29,38 @@ export class AgentOrchestrator {
     ) {
         this.logger.log(`Processing intent for Coach ${coachId} from ${sender}`);
         this.logger.log(`Email handling mode: ${emailHandlingMode}, Admin override: ${adminOverride?.enabled || false}`);
-        this.logger.log(`Email handling mode: ${emailHandlingMode}, Admin override: ${adminOverride?.enabled || false}`);
 
-        // 0. Resolve Player ID from Sender Email
-        let playerId: string | undefined;
+        const labelsToAdd = new Set<string>(['sqd-read']);
+
         try {
-            const player = await this.pythonAdapter.findPlayerByEmail(coachId, sender);
-            if (player) {
-                playerId = player.id || player._id;
-                this.logger.log(`Resolved Player ID: ${playerId} for sender: ${sender}`);
-            } else {
-                this.logger.log(`No existing player found for sender: ${sender}`);
+            // 0. Resolve Player ID from Sender Email
+            let playerId: string | undefined;
+            try {
+                const player = await this.pythonAdapter.findPlayerByEmail(coachId, sender);
+                if (player) {
+                    playerId = player.id || player._id;
+                    this.logger.log(`Resolved Player ID: ${playerId} for sender: ${sender}`);
+                } else {
+                    this.logger.log(`No existing player found for sender: ${sender}`);
+                }
+            } catch (e) {
+                this.logger.warn(`Failed to lookup player for sender ${sender}`, e);
             }
-        } catch (e) {
-            this.logger.warn(`Failed to lookup player for sender ${sender}`, e);
-        }
 
             // 1. Analyze with Gemini
-        const analysis = await this.geminiService.analyzeEmail(subject, emailContent, sender, coachId, playerId);
+            const analysis = await this.geminiService.analyzeEmail(subject, emailContent, sender, coachId, playerId);
 
-        this.logger.debug(`[LLM RAW ANALYSIS] ${JSON.stringify(analysis)}`);
-        this.logger.log(`[LLM DECISION] Intent: ${analysis.intent} | Skills: ${analysis.skills_identified.join(', ')} | Confidence: ${analysis.confidence}`);
+            this.logger.debug(`[LLM RAW ANALYSIS] ${JSON.stringify(analysis)}`);
+            this.logger.log(`[LLM DECISION] Intent: ${analysis.intent} | Skills: ${analysis.skills_identified.join(', ')} | Confidence: ${analysis.confidence}`);
 
-        if (analysis.intent === 'OTHER') {
-            this.logger.log(`Skipping email from ${sender} - Intent: OTHER`);
-            // Requirement: Leave as unread. No action needed as we just don't reply/modify.
-            await this.gmailService.addLabels(refreshToken, threadId, ['sqd-read'], clientId, clientSecret);
-            return;
-        }
+            if (analysis.intent === 'OTHER') {
+                this.logger.log(`Skipping email from ${sender} - Intent: OTHER`);
+                return;
+            }
 
-        let replyText = analysis.email_draft?.body || ''; // Default to LLM draft if valid
-        let success = false;
+            let replyText = analysis.email_draft?.body || ''; // Default to LLM draft if valid
+            let success = false;
 
-        try {
             // 2. CHECK_SCHEDULE Logic
             if (analysis.intent === 'CHECK_SCHEDULE' || analysis.intent === 'MULTI_INTENT') {
                 this.logger.log(`[SKILL EXEC] Executing Check Schedule Logic`);
@@ -73,17 +72,11 @@ export class AgentOrchestrator {
 
                 // If intent was purely check schedule, override or append to draft
                 const scheduleMsg = `Here is your schedule details:\n${scheduleText}`;
-
-                // If we have a draft, we might want to check if it already has placeholders, 
-                // but for now, let's append the hard data if the LLM didn't have access to it.
-                // Or better: The prompt didn't have tools to get data yet, so the draft is likely just a confirmation.
-                // We append the real data.
                 replyText = replyText ? `${replyText}\n\n${scheduleMsg}` : `Here is your schedule:\n${scheduleText}`;
                 success = true;
             }
 
             // 3. BOOK_LESSON Logic
-        // 3. BOOK_LESSON Logic
             // If multi-intent, we append booking confirmation to schedule text
             if (analysis.intent === 'BOOK_LESSON' || analysis.intent === 'MULTI_INTENT') {
                 const requests = analysis.requests || [];
@@ -134,7 +127,7 @@ export class AgentOrchestrator {
                 if (emailHandlingMode === 'send_full_replies') {
                     // Send the reply
                     await this.gmailService.sendReply(refreshToken, threadId, replyText, recipientEmail, subject);
-                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD Handled', 'sqd-read'], clientId, clientSecret);
+                    labelsToAdd.add('SQD Handled');
 
                     // Log the sent email
                     await this.pythonAdapter.logEmail({
@@ -154,7 +147,7 @@ export class AgentOrchestrator {
                 } else {
                     // Draft only mode
                     await this.gmailService.createDraft(refreshToken, threadId, replyText, recipientEmail, subject);
-                    await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending', 'sqd-read'], clientId, clientSecret);
+                    labelsToAdd.add('SQD review pending');
 
                     // Log the drafted email
                     await this.pythonAdapter.logEmail({
@@ -173,13 +166,16 @@ export class AgentOrchestrator {
                     this.logger.log(`[ACTION: DRAFT] Created draft for ${recipientEmail}`);
                 }
             }
-
         } catch (error) {
             this.logger.error('Error executing agent actions', error);
-            // On error, try to tag as review pending?
+            labelsToAdd.add('SQD review pending');
+        } finally {
             try {
-                await this.gmailService.addLabels(refreshToken, threadId, ['SQD review pending', 'sqd-read'], clientId, clientSecret);
-            } catch (e) { console.error('Failed to tag error email', e); }
+                // Ensure labels are always applied (e.g. sqd-read)
+                await this.gmailService.addLabels(refreshToken, threadId, Array.from(labelsToAdd), clientId, clientSecret);
+            } catch (e) {
+                this.logger.error('Failed to apply labels in finally block', e);
+            }
         }
     }
 
