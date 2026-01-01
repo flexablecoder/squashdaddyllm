@@ -81,30 +81,80 @@ export class AgentOrchestrator {
             if (analysis.intent === 'BOOK_LESSON' || analysis.intent === 'MULTI_INTENT') {
                 const requests = analysis.requests || [];
                 for (const req of requests) {
-                    if (req.intent === 'BOOK_LESSON' && req.date && req.time) {
-                        this.logger.log(`[SKILL EXEC] Executing Book Lesson Logic for ${req.date} @ ${req.time}`);
-
+                    if (req.intent === 'BOOK_LESSON' && req.date) {
+                        // Normalize date to YYYY-MM-DD format
+                        let normalizedDate = req.date;
+                        if (!/^\d{4}-\d{2}-\d{2}$/.test(req.date)) {
+                            // Attempt to parse relative date
+                            const parsedDate = new Date(req.date);
+                            if (!isNaN(parsedDate.getTime())) {
+                                normalizedDate = parsedDate.toISOString().split('T')[0];
+                                this.logger.log(`[DATE NORMALIZATION] Converted '${req.date}' to '${normalizedDate}'`);
+                            } else {
+                                this.logger.warn(`[DATE NORMALIZATION] Could not parse date: '${req.date}'`);
+                            }
+                        }
+                        
+                        this.logger.log(`[DEBUG] LLM Request: date=${normalizedDate}, time=${req.time}, range=${req.time_range_start}-${req.time_range_end}`);
+                        
                         // Check availability
-                        const slots = await this.pythonAdapter.findAvailability(coachId, req.date);
-                        const targetSlot = slots?.find(s => s.start_time.startsWith(req.time) && s.is_available);
+                        const slots = await this.pythonAdapter.findAvailability(coachId, normalizedDate);
+                        this.logger.log(`[DEBUG] findAvailability returned ${slots?.length || 0} slots: ${JSON.stringify(slots?.slice(0, 5))}`);
+                        
+                        let targetSlot;
+
+                        // Check if time is in valid HH:MM format (e.g., "15:00", "09:30")
+                        const isValidTimeFormat = req.time && /^\d{1,2}:\d{2}$/.test(req.time);
+
+                        // Tier 1: Exact Match (Strict) - ONLY if time is valid HH:MM
+                        if (isValidTimeFormat) {
+                            this.logger.log(`[SKILL EXEC] Executing Book Lesson Logic for ${normalizedDate} @ ${req.time} (Strict)`);
+                            targetSlot = slots?.find(s => s.start_time.startsWith(req.time) && s.is_available);
+                        }
+                        
+                        // If no slot found yet, use Flexible Logic
+                        if (!targetSlot) {
+                            // Tier 2: Range Match
+                            if (req.time_range_start) {
+                                this.logger.log(`[SKILL EXEC] Executing Book Lesson Logic for ${normalizedDate} between ${req.time_range_start} and ${req.time_range_end || '23:59'}`);
+                                const endRange = req.time_range_end || '23:59';
+                                targetSlot = slots?.find(s => 
+                                    s.is_available && 
+                                    s.start_time >= req.time_range_start! && 
+                                    s.start_time < endRange
+                                );
+                            }
+
+                            // Tier 3: First Available Fallback
+                            if (!targetSlot) {
+                                this.logger.log(`[SKILL EXEC] Executing Book Lesson Logic for ${normalizedDate} (First Available Fallback)`);
+                                targetSlot = slots?.find(s => s.is_available);
+                            }
+                        }
 
                         if (targetSlot) {
                             await this.pythonAdapter.createBooking({
                                 coach_id: coachId,
-                                player_id: playerId || "determined-from-sender-email", // Updated to use resolved ID
+                                player_id: playerId || "determined-from-sender-email", 
                                 booking_date: req.date,
-                                start_time: req.time,
+                                start_time: targetSlot.start_time,
                                 end_time: "calculated-end",
                                 status: "confirmed"
                             });
-                            const bookingMsg = `Confirmed booking for ${req.date} at ${req.time}.`;
-                            replyText = replyText ? `${replyText}\n\n${bookingMsg}` : bookingMsg;
+
+                            // Calculate alternatives (excluding the booked slot)
+                            const alternatives = slots ? slots.filter(s => s.is_available && s.start_time !== targetSlot.start_time).slice(0, 2) : [];
+                            const altText = alternatives.length > 0 ? `\n\nOther available times: ${alternatives.map(s => s.start_time).join(', ')}.` : '';
+
+                            // Overwrite replyText to strictly use the confirmation message (discarding LLM draft)
+                            replyText = `Hi,\n\nI have booked you for ${req.date} at ${targetSlot.start_time}.${altText}\n\nThanks,\nSquashDaddy Agent`;
                             success = true;
                         } else {
                             // Suggest alternatives
                             const alternatives = slots ? slots.filter(s => s.is_available).slice(0, 2) : [];
                             const altText = alternatives.map(s => s.start_time).join(' or ');
-                            const failMsg = `Sorry, ${req.time} is not available on ${req.date}.` + (altText ? ` Try: ${altText}` : '');
+                            const timeDesc = req.time ? req.time : (req.time_range_start ? `between ${req.time_range_start} and ${req.time_range_end}` : 'that day');
+                            const failMsg = `Sorry, no time available ${timeDesc} on ${req.date}.` + (altText ? ` Try: ${altText}` : '');
 
                             replyText = replyText ? `${replyText}\n\n${failMsg}` : failMsg;
                             success = false;

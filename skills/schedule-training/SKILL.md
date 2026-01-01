@@ -10,6 +10,8 @@ by default schedules should start on the hour and last for an hour. If the user/
 
 When doing the scheduling, you should request the coach's and booked times using the coach availabilty times api and the . for the dates that they are booking, you should request the coach's schedule and booked times for each date. If the user/player/parent is asking to schedule a lesson with an indeterminate date, you should schedule the training for the next day that is available. if the user/player/parent is asking to schedule for a specific date and time and it is available, you should schedule the training for that date and time. If the user/player/parent is asking to schedule for a specific date and time and it is not available, you should suggest the next available time and include 2 alternative times in the response.
 
+If the user is asking to schedule a lesson on a given day but has not specified a time, you should schedule the lesson for the first available time on that day. if a user specfies an approximate time on a given day (ie in the morning or in the afternoon), you should schedule the lesson for the first available time on that day that is closest to the specified time. If the user is asking to schedule a lesson on a given day and time but the time is not available, you should suggest the next available time and include 2 alternative times in the response.
+
 ## Prerequisites
 
 1. Call the api to get the coaches avaialability -- api/coaches/{coach_id}/availability

@@ -96,7 +96,7 @@ describe('AgentOrchestrator', () => {
         expect(gmailService.sendReply).toHaveBeenCalledWith(
             mockToken,
             'thread-123',
-            expect.stringContaining('Confirmed booking'),
+            expect.stringContaining('I have booked you for 2025-01-02 at 11:00'),
             mockSender,
             'Subject'
         );
@@ -111,10 +111,10 @@ describe('AgentOrchestrator', () => {
             skills_identified: ['schedule-training'],
             confidence: 0.9
         });
-        // 14:00 unavailable
+        // ALL slots unavailable (to test failure/suggestion path)
         pythonAdapter.findAvailability.mockResolvedValue([
             { start_time: '14:00', is_available: false },
-            { start_time: '15:00', is_available: true }
+            { start_time: '15:00', is_available: false }
         ]);
 
         await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken, 'thread-123', 'draft_only', null);
@@ -143,5 +143,97 @@ describe('AgentOrchestrator', () => {
         expect(gmailService.sendReply).not.toHaveBeenCalled();
         expect(gmailService.createDraft).not.toHaveBeenCalled();
         expect(gmailService.addLabels).toHaveBeenCalledWith(mockToken, 'thread-123', ['sqd-read'], undefined, undefined);
+    });
+
+    describe('Functional Scheduling Scenarios', () => {
+        // Scenario 1: "Friday Morning" Request (Unavailable) -> Expect Booking at 15:00
+        // User Expectation: System schedules for 3pm (First available slot on valid day) despite morning preference failing.
+        it('should book first available afternoon slot when morning is requested but unavailable', async () => {
+            geminiService.analyzeEmail.mockResolvedValue({
+                intent: 'BOOK_LESSON',
+                requests: [{ 
+                    intent: 'BOOK_LESSON', 
+                    date: '2025-01-03', 
+                    time_range_start: '06:00',
+                    time_range_end: '18:00'
+                }], // LLM interprets 'morning' + flexibility as 6am-6pm range
+                skills_identified: ['schedule-training'],
+                confidence: 0.95,
+                email_draft: { body: 'Draft' }
+            });
+            
+            // Coach available 15:00 - 18:00
+            pythonAdapter.findAvailability.mockResolvedValue([
+                { start_time: '15:00', is_available: true },
+                { start_time: '16:00', is_available: true },
+                { start_time: '17:00', is_available: true },
+                { start_time: '18:00', is_available: true }
+            ]);
+            pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender });
+            pythonAdapter.createBooking.mockResolvedValue({ id: 'booking_123' });
+
+            await orchestrator.processEmailIntent(mockCoachId, 'Msg', 'jhirschi@hotmail.com', 'can we book a lesson for friday', mockToken, 'thread-func-1', 'send_full_replies', null);
+
+            // Expectation: Should book 15:00
+            expect(pythonAdapter.createBooking).toHaveBeenCalledWith(expect.objectContaining({
+                booking_date: '2025-01-03',
+                start_time: '15:00'
+            }));
+            
+            // Expect reply to mention booking
+            // Expect reply to mention booking and alternatives
+            expect(gmailService.sendReply).toHaveBeenCalledWith(
+                mockToken, 'thread-func-1',
+                expect.stringContaining('I have booked you for 2025-01-03 at 15:00'),
+                'jhirschi@hotmail.com', 'can we book a lesson for friday'
+            );
+            
+            // Also expect it to mention other times
+            expect(gmailService.sendReply).toHaveBeenCalledWith(
+                mockToken, 'thread-func-1',
+                expect.stringContaining('Other available times: 16:00, 17:00'),
+                'jhirschi@hotmail.com', 'can we book a lesson for friday'
+            );
+        });
+
+        // Scenario 2: Happy Path
+        it('should book specific available slot', async () => {
+            geminiService.analyzeEmail.mockResolvedValue({
+                intent: 'BOOK_LESSON',
+                requests: [{ intent: 'BOOK_LESSON', date: '2025-01-03', time: '16:00' }],
+                skills_identified: ['schedule-training'],
+                confidence: 0.95
+            });
+             pythonAdapter.findAvailability.mockResolvedValue([
+                { start_time: '16:00', is_available: true }
+            ]);
+
+            await orchestrator.processEmailIntent(mockCoachId, 'Msg', mockSender, 'Fri 4pm', mockToken, 'thread-func-2', 'send_full_replies', null);
+
+            expect(pythonAdapter.createBooking).toHaveBeenCalledWith(expect.objectContaining({
+                booking_date: '2025-01-03',
+                start_time: '16:00'
+            }));
+        });
+
+        // Scenario 3: Unavailable Date
+        it('should suggest alternatives when fully unavailable', async () => {
+            geminiService.analyzeEmail.mockResolvedValue({
+                intent: 'BOOK_LESSON',
+                requests: [{ intent: 'BOOK_LESSON', date: '2025-01-04', time: '10:00' }],
+                skills_identified: ['schedule-training'],
+                confidence: 0.95
+            });
+            pythonAdapter.findAvailability.mockResolvedValue([]); // No slots
+
+            await orchestrator.processEmailIntent(mockCoachId, 'Msg', mockSender, 'Sat 10am', mockToken, 'thread-func-3', 'send_full_replies', null);
+
+             expect(pythonAdapter.createBooking).not.toHaveBeenCalled();
+             expect(gmailService.sendReply).toHaveBeenCalledWith(
+                mockToken, 'thread-func-3',
+                expect.stringContaining('Sorry'), // Expect apology/suggestion logic
+                 mockSender, 'Sat 10am'
+            );
+        });
     });
 });

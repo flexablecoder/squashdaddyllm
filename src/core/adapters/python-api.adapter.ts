@@ -146,14 +146,17 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
     async findAvailability(coachId: string, date: string): Promise<AvailabilitySlot[]> {
         try {
             await this.ensureAuthenticated();
+            // Call the correct endpoint that returns time slots
             const response = await firstValueFrom(
-                this.httpService.post(`${this.baseUrl}/api/availability/check`, {
-                    coach_id: coachId,
-                    date: date,
+                this.httpService.get(`${this.baseUrl}/api/coaches/${coachId}/availability`, {
+                    params: { date: date }
                 })
             );
-            return []; // Placeholder as per original
+            // Expecting response.data to be an array of slots like: [{start_time: '15:00', is_available: true}, ...]
+            this.logger.debug(`[findAvailability] Date: ${date}, Slots: ${JSON.stringify(response.data)}`);
+            return response.data || [];
         } catch (error) {
+            this.logger.error(`[findAvailability] Error fetching availability for ${coachId} on ${date}`, error);
             this.handleError(error);
             return [];
         }
