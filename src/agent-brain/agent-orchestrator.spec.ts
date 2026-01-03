@@ -21,6 +21,7 @@ describe('AgentOrchestrator', () => {
             findAvailability: jest.fn(),
             createBooking: jest.fn(),
             findPlayerByEmail: jest.fn(),
+            lookupPlayerByEmail: jest.fn(), // Global player lookup
             getCoachEmail: jest.fn(),
             logEmail: jest.fn(),
         };
@@ -56,6 +57,7 @@ describe('AgentOrchestrator', () => {
         pythonAdapter.getPlayerSchedule.mockResolvedValue([
             { date: '2025-01-01', time: '10:00', coach: 'Coach Nick' }
         ]);
+        pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Global
         pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender });
 
         await orchestrator.processEmailIntent(mockCoachId, 'Msg Body', mockSender, 'Subject', mockToken, 'thread-123', 'send_full_replies', null);
@@ -83,11 +85,12 @@ describe('AgentOrchestrator', () => {
         pythonAdapter.findAvailability.mockResolvedValue([
             { start_time: '11:00', is_available: true }
         ]);
-        pythonAdapter.findPlayerByEmail.mockResolvedValue(null); // No player found case
+        pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Global lookup
+        pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Coach connection
 
         await orchestrator.processEmailIntent(mockCoachId, 'Book me', mockSender, 'Subject', mockToken, 'thread-123', 'send_full_replies', null);
         
-        expect(geminiService.analyzeEmail).toHaveBeenCalledWith('Subject', 'Book me', mockSender, mockCoachId, undefined);
+        expect(geminiService.analyzeEmail).toHaveBeenCalledWith('Subject', 'Book me', mockSender, mockCoachId, 'player_123');
 
         expect(pythonAdapter.createBooking).toHaveBeenCalledWith(expect.objectContaining({
             booking_date: '2025-01-02',
@@ -96,7 +99,7 @@ describe('AgentOrchestrator', () => {
         expect(gmailService.sendReply).toHaveBeenCalledWith(
             mockToken,
             'thread-123',
-            expect.stringContaining('I have booked you for 2025-01-02 at 11:00'),
+            expect.stringContaining('I have created a booking for 2025-01-02 at 11:00'),
             mockSender,
             'Subject'
         );
@@ -116,6 +119,8 @@ describe('AgentOrchestrator', () => {
             { start_time: '14:00', is_available: false },
             { start_time: '15:00', is_available: false }
         ]);
+        pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Global lookup
+        pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Coach connection
 
         await orchestrator.processEmailIntent(mockCoachId, 'Book 2pm', mockSender, 'Subject', mockToken, 'thread-123', 'draft_only', null);
 
@@ -169,7 +174,8 @@ describe('AgentOrchestrator', () => {
                 { start_time: '17:00', is_available: true },
                 { start_time: '18:00', is_available: true }
             ]);
-            pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender });
+            pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Global
+            pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Connected
             pythonAdapter.createBooking.mockResolvedValue({ id: 'booking_123' });
 
             await orchestrator.processEmailIntent(mockCoachId, 'Msg', 'jhirschi@hotmail.com', 'can we book a lesson for friday', mockToken, 'thread-func-1', 'send_full_replies', null);
@@ -184,14 +190,14 @@ describe('AgentOrchestrator', () => {
             // Expect reply to mention booking and alternatives
             expect(gmailService.sendReply).toHaveBeenCalledWith(
                 mockToken, 'thread-func-1',
-                expect.stringContaining('I have booked you for 2025-01-03 at 15:00'),
+                expect.stringContaining('I have created a booking for 2025-01-03 at 15:00'),
                 'jhirschi@hotmail.com', 'can we book a lesson for friday'
             );
             
             // Also expect it to mention other times
             expect(gmailService.sendReply).toHaveBeenCalledWith(
                 mockToken, 'thread-func-1',
-                expect.stringContaining('Other available times: 16:00, 17:00'),
+                expect.stringContaining('Alternative times available'),
                 'jhirschi@hotmail.com', 'can we book a lesson for friday'
             );
         });
@@ -207,6 +213,8 @@ describe('AgentOrchestrator', () => {
              pythonAdapter.findAvailability.mockResolvedValue([
                 { start_time: '16:00', is_available: true }
             ]);
+            pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Global
+            pythonAdapter.findPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Connected
 
             await orchestrator.processEmailIntent(mockCoachId, 'Msg', mockSender, 'Fri 4pm', mockToken, 'thread-func-2', 'send_full_replies', null);
 
@@ -216,22 +224,44 @@ describe('AgentOrchestrator', () => {
             }));
         });
 
-        // Scenario 3: Unavailable Date
-        it('should suggest alternatives when fully unavailable', async () => {
+        // Scenario 3: Unknown player - should get registration email
+        it('should suggest registration when player is unknown', async () => {
             geminiService.analyzeEmail.mockResolvedValue({
                 intent: 'BOOK_LESSON',
                 requests: [{ intent: 'BOOK_LESSON', date: '2025-01-04', time: '10:00' }],
                 skills_identified: ['schedule-training'],
                 confidence: 0.95
             });
-            pythonAdapter.findAvailability.mockResolvedValue([]); // No slots
+            pythonAdapter.lookupPlayerByEmail.mockResolvedValue(null); // Unknown globally
+            pythonAdapter.findPlayerByEmail.mockResolvedValue(null); 
 
             await orchestrator.processEmailIntent(mockCoachId, 'Msg', mockSender, 'Sat 10am', mockToken, 'thread-func-3', 'send_full_replies', null);
 
              expect(pythonAdapter.createBooking).not.toHaveBeenCalled();
              expect(gmailService.sendReply).toHaveBeenCalledWith(
                 mockToken, 'thread-func-3',
-                expect.stringContaining('Sorry'), // Expect apology/suggestion logic
+                expect.stringContaining('register'), // Expect registration link
+                 mockSender, 'Sat 10am'
+            );
+        });
+
+        // Scenario 4: Player registered but not connected - should get connection pending email
+        it('should suggest connection when player exists but is not connected', async () => {
+            geminiService.analyzeEmail.mockResolvedValue({
+                intent: 'BOOK_LESSON',
+                requests: [{ intent: 'BOOK_LESSON', date: '2025-01-04', time: '10:00' }],
+                skills_identified: ['schedule-training'],
+                confidence: 0.95
+            });
+            pythonAdapter.lookupPlayerByEmail.mockResolvedValue({ id: 'player_123', email: mockSender }); // Exists globally
+            pythonAdapter.findPlayerByEmail.mockResolvedValue(null); // Not connected to this coach
+
+            await orchestrator.processEmailIntent(mockCoachId, 'Msg', mockSender, 'Sat 10am', mockToken, 'thread-func-4', 'send_full_replies', null);
+
+             expect(pythonAdapter.createBooking).not.toHaveBeenCalled();
+             expect(gmailService.sendReply).toHaveBeenCalledWith(
+                mockToken, 'thread-func-4',
+                expect.stringContaining('not yet connected'), // Expect connection pending message
                  mockSender, 'Sat 10am'
             );
         });

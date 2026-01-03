@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 import { firstValueFrom } from 'rxjs';
 import { IBookingSystem } from '../interfaces/booking-system.interface';
 import { AvailabilitySlot } from '../../common/dtos/availability.dto';
+import { calculateAvailableSlots, getAvailableSlotsOnly } from '../utils/availability.utils';
 
 @Injectable()
 export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
@@ -59,6 +60,7 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
 
             if (this.accessToken) {
                 config.headers.Authorization = `Bearer ${this.accessToken}`;
+                this.logger.debug(`[AUTH] Token attached to request: ${config.url}`);
             }
             return config;
         }, (error) => {
@@ -71,19 +73,24 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
             async (error) => {
                 const originalRequest = error.config;
 
-                // If 401 and not already retried
-                if (error.response?.status === 401 && !originalRequest._retry) {
+                // If 401 and not already retried, and not the oauth endpoint
+                if (error.response?.status === 401 && !originalRequest._retry && !originalRequest.url?.includes('/api/oauth/token')) {
                     originalRequest._retry = true;
+                    this.logger.warn(`[AUTH] 401 received, refreshing token for: ${originalRequest.url}`);
 
                     try {
                         // Force token refresh
                         this.accessToken = null;
+                        this.tokenExpiry = 0;
                         await this.authenticate();
+                        
+                        this.logger.log(`[AUTH] Token refreshed, retrying request: ${originalRequest.url}`);
 
                         // Update header and retry
                         originalRequest.headers.Authorization = `Bearer ${this.accessToken}`;
                         return this.httpService.axiosRef(originalRequest);
                     } catch (refreshError) {
+                        this.logger.error(`[AUTH] Token refresh failed`, refreshError);
                         return Promise.reject(refreshError);
                     }
                 }
@@ -143,33 +150,104 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
         }
     }
 
-    async findAvailability(coachId: string, date: string): Promise<AvailabilitySlot[]> {
+    /**
+     * Get coach's weekly availability schedule
+     * Endpoint: GET /api/availability?coach_id=X
+     */
+    async getCoachSchedule(coachId: string): Promise<any[]> {
         try {
             await this.ensureAuthenticated();
-            // Call the correct endpoint that returns time slots
             const response = await firstValueFrom(
-                this.httpService.get(`${this.baseUrl}/api/coaches/${coachId}/availability`, {
-                    params: { date: date }
+                this.httpService.get(`${this.baseUrl}/api/availability`, {
+                    params: { coach_id: coachId }
                 })
             );
-            // Expecting response.data to be an array of slots like: [{start_time: '15:00', is_available: true}, ...]
-            this.logger.debug(`[findAvailability] Date: ${date}, Slots: ${JSON.stringify(response.data)}`);
+            this.logger.debug(`[getCoachSchedule] Coach: ${coachId}, Schedule: ${JSON.stringify(response.data)}`);
             return response.data || [];
         } catch (error) {
-            this.logger.error(`[findAvailability] Error fetching availability for ${coachId} on ${date}`, error);
+            this.logger.error(`[getCoachSchedule] Error fetching schedule for ${coachId}`, error);
             this.handleError(error);
             return [];
         }
     }
 
+    /**
+     * Get bookings for a coach, optionally filtered by date range
+     * Endpoint: GET /api/bookings?coach_id=X&view_mode=coach&start_date=X&end_date=X
+     */
+    async getBookings(coachId: string, startDate?: string, endDate?: string): Promise<any[]> {
+        try {
+            await this.ensureAuthenticated();
+            const params: any = { 
+                coach_id: coachId,
+                view_mode: 'coach'
+            };
+            if (startDate) params.start_date = startDate;
+            if (endDate) params.end_date = endDate;
+            
+            const response = await firstValueFrom(
+                this.httpService.get(`${this.baseUrl}/api/bookings`, { params })
+            );
+            this.logger.debug(`[getBookings] Coach: ${coachId}, Range: ${startDate}-${endDate}, Count: ${response.data?.length}`);
+            return response.data || [];
+        } catch (error) {
+            this.logger.error(`[getBookings] Error fetching bookings for ${coachId}`, error);
+            this.handleError(error);
+            return [];
+        }
+    }
+
+    /**
+     * Find available booking slots for a date or date range
+     * Combines coach schedule with existing bookings
+     */
+    async findAvailability(coachId: string, startDate: string, endDate?: string): Promise<AvailabilitySlot[]> {
+        try {
+            // Fetch schedule and bookings in parallel
+            const [schedule, bookings] = await Promise.all([
+                this.getCoachSchedule(coachId),
+                this.getBookings(coachId, startDate, endDate || startDate)
+            ]);
+
+            // Calculate available slots
+            const allSlots = calculateAvailableSlots(schedule, bookings, startDate, endDate);
+            const availableSlots = getAvailableSlotsOnly(allSlots);
+            
+            this.logger.debug(`[findAvailability] Date: ${startDate}${endDate ? '-' + endDate : ''}, Available: ${availableSlots.length} slots`);
+            
+            // Convert to expected format
+            return availableSlots.map(slot => ({
+                start_time: slot.start_time,
+                is_available: slot.is_available,
+                date: slot.date
+            }));
+        } catch (error) {
+            this.logger.error(`[findAvailability] Error calculating availability for ${coachId}`, error);
+            this.handleError(error);
+            return [];
+        }
+    }
+
+    /**
+     * Create a booking
+     * Endpoint: POST /api/bookings?user_id=X (user_id required for service accounts)
+     */
     async createBooking(bookingDetails: any): Promise<any> {
         try {
             await this.ensureAuthenticated();
+            // Service accounts must specify user_id as query param
+            const coachId = bookingDetails.coach_id;
             const response = await firstValueFrom(
-                this.httpService.post(`${this.baseUrl}/api/bookings`, bookingDetails)
+                this.httpService.post(
+                    `${this.baseUrl}/api/bookings`,
+                    bookingDetails,
+                    { params: { user_id: coachId } }
+                )
             );
+            this.logger.debug(`[createBooking] Created booking for coach ${coachId}`);
             return response.data;
         } catch (error) {
+            this.logger.error(`[createBooking] Error creating booking`, error);
             this.handleError(error);
         }
     }
@@ -179,7 +257,7 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
             await this.ensureAuthenticated();
             // Pass user_id to filter players for this specific coach context
             const response = await firstValueFrom(
-                this.httpService.get(`${this.baseUrl}/api/coaches/me/players`, {
+                this.httpService.get(`${this.baseUrl}/api/coach/students`, {
                     params: { user_id: coachId }
                 })
             );
@@ -209,13 +287,60 @@ export class PythonApiAdapter implements IBookingSystem, OnModuleInit {
         ];
     }
 
-    async findPlayerByEmail(coachId: string, email: string): Promise<any> {
+    async findPlayerByEmail(coachId: string, senderString: string): Promise<any> {
         try {
+            // Extract email from "Name <email>" format
+            const emailMatch = senderString.match(/<([^>]+)>/);
+            const email = emailMatch ? emailMatch[1] : senderString;
+            this.logger.debug(`[findPlayerByEmail] Extracted email: ${email} from: ${senderString}`);
+            
             const players = await this.getAssignedPlayers(coachId);
-            const player = players.find(p => p.email.toLowerCase() === email.toLowerCase());
+            this.logger.debug(`[findPlayerByEmail] Coach ${coachId} has ${players.length} assigned players`);
+            
+            const player = players.find(p => p.email?.toLowerCase() === email.toLowerCase());
+            if (player) {
+                this.logger.log(`[findPlayerByEmail] Found player: ${player._id || player.id} for email ${email}`);
+            } else {
+                this.logger.log(`[findPlayerByEmail] No player found for email ${email}`);
+            }
             return player || null;
         } catch (error) {
-            this.logger.warn(`Failed to find player by email ${email} for coach ${coachId}`, error);
+            this.logger.warn(`Failed to find player by email ${senderString} for coach ${coachId}`, error);
+            return null;
+        }
+    }
+
+    /**
+     * Look up a player globally by email (independent of coach assignment).
+     * Uses /api/users/_?email=X to check if a user exists in the system.
+     * @returns Player object if exists, null if not found
+     */
+    async lookupPlayerByEmail(senderString: string): Promise<any> {
+        try {
+            // Extract email from "Name <email>" format
+            const emailMatch = senderString.match(/<([^>]+)>/);
+            const email = emailMatch ? emailMatch[1] : senderString;
+            this.logger.debug(`[lookupPlayerByEmail] Looking up global player for email: ${email}`);
+            
+            await this.ensureAuthenticated();
+            const response = await firstValueFrom(
+                this.httpService.get(`${this.baseUrl}/api/users/_`, {
+                    params: { email }
+                })
+            );
+            
+            if (response.data) {
+                this.logger.log(`[lookupPlayerByEmail] Found player in system: ${response.data._id || response.data.id}`);
+                return response.data;
+            }
+            return null;
+        } catch (error: any) {
+            // 404 means user not found - this is expected, not an error
+            if (error.response?.status === 404) {
+                this.logger.log(`[lookupPlayerByEmail] No player found in system for email: ${senderString}`);
+                return null;
+            }
+            this.logger.warn(`Failed to lookup player by email ${senderString}`, error);
             return null;
         }
     }

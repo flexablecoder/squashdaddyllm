@@ -33,18 +33,35 @@ export class AgentOrchestrator {
         const labelsToAdd = new Set<string>(['sqd-read']);
 
         try {
-            // 0. Resolve Player ID from Sender Email
+            // 0. Two-Step Player Verification
+            // Step 1: Check if player exists in system at all (global lookup)
+            let playerExistsGlobally = false;
+            let playerConnectedToCoach = false;
             let playerId: string | undefined;
+            
             try {
-                const player = await this.pythonAdapter.findPlayerByEmail(coachId, sender);
-                if (player) {
-                    playerId = player.id || player._id;
-                    this.logger.log(`Resolved Player ID: ${playerId} for sender: ${sender}`);
+                // Step 1: Global player lookup
+                const globalPlayer = await this.pythonAdapter.lookupPlayerByEmail(sender);
+                playerExistsGlobally = !!globalPlayer;
+                
+                if (globalPlayer) {
+                    this.logger.log(`Player exists in system: ${globalPlayer._id || globalPlayer.id}`);
+                    
+                    // Step 2: Check if connected to this specific coach
+                    const connectedPlayer = await this.pythonAdapter.findPlayerByEmail(coachId, sender);
+                    playerConnectedToCoach = !!connectedPlayer;
+                    
+                    if (connectedPlayer) {
+                        playerId = connectedPlayer.id || connectedPlayer._id;
+                        this.logger.log(`Player connected to coach: ${playerId}`);
+                    } else {
+                        this.logger.log(`Player exists but NOT connected to coach ${coachId}`);
+                    }
                 } else {
-                    this.logger.log(`No existing player found for sender: ${sender}`);
+                    this.logger.log(`Player does not exist in system for sender: ${sender}`);
                 }
             } catch (e) {
-                this.logger.warn(`Failed to lookup player for sender ${sender}`, e);
+                this.logger.warn(`Failed during player verification for sender ${sender}`, e);
             }
 
             // 1. Analyze with Gemini
@@ -79,19 +96,73 @@ export class AgentOrchestrator {
             // 3. BOOK_LESSON Logic
             // If multi-intent, we append booking confirmation to schedule text
             if (analysis.intent === 'BOOK_LESSON' || analysis.intent === 'MULTI_INTENT') {
-                const requests = analysis.requests || [];
-                for (const req of requests) {
-                    if (req.intent === 'BOOK_LESSON' && req.date) {
-                        // Normalize date to YYYY-MM-DD format
-                        let normalizedDate = req.date;
-                        if (!/^\d{4}-\d{2}-\d{2}$/.test(req.date)) {
-                            // Attempt to parse relative date
-                            const parsedDate = new Date(req.date);
-                            if (!isNaN(parsedDate.getTime())) {
-                                normalizedDate = parsedDate.toISOString().split('T')[0];
-                                this.logger.log(`[DATE NORMALIZATION] Converted '${req.date}' to '${normalizedDate}'`);
+                // EARLY EXIT: Two-step verification
+                // Case 1: Player not registered in system at all
+                if (!playerExistsGlobally) {
+                    this.logger.log(`[BOOK_LESSON] Player not registered - sending registration email`);
+                    replyText = `Hi,
+
+Thank you for reaching out! I'd love to help you schedule a training session.
+
+However, you don't appear to have an account in our system yet. Please register at:
+
+http://squashdaddy.com/register
+
+Once registered, you can request to connect with your coach and I'll be able to help schedule your training.
+
+Thanks,
+SquashDaddy Agent`;
+                    success = true;
+                } 
+                // Case 2: Player registered but not connected to this coach
+                else if (!playerConnectedToCoach) {
+                    this.logger.log(`[BOOK_LESSON] Player not connected to coach - sending connection pending email`);
+                    replyText = `Hi,
+
+I see you have an account but you're not yet connected with this coach.
+
+Your connection request may be pending approval. Once the coach accepts your connection, I'll be able to help you schedule training sessions.
+
+If you haven't sent a connection request yet, please visit your dashboard at:
+
+http://squashdaddy.com/dashboard
+
+Thanks,
+SquashDaddy Agent`;
+                    success = true;
+                } else {
+                    // Player is known, proceed with booking logic
+                    const requests = analysis.requests || [];
+                    for (const req of requests) {
+                        if (req.intent === 'BOOK_LESSON' && req.date) {
+                            // Normalize date to YYYY-MM-DD format
+                            let normalizedDate = req.date;
+                            if (!/^\d{4}-\d{2}-\d{2}$/.test(req.date)) {
+                            // Handle relative day names (friday, saturday, etc.)
+                            const dayNames = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
+                            const lowerDate = req.date.toLowerCase();
+                            const dayIndex = dayNames.findIndex(d => lowerDate.includes(d));
+                            
+                            if (dayIndex !== -1) {
+                                // Calculate next occurrence of that day
+                                const today = new Date();
+                                const currentDay = today.getDay();
+                                let daysUntil = dayIndex - currentDay;
+                                if (daysUntil <= 0) daysUntil += 7; // Next week if today or past
+                                
+                                const targetDate = new Date(today);
+                                targetDate.setDate(today.getDate() + daysUntil);
+                                normalizedDate = targetDate.toISOString().split('T')[0];
+                                this.logger.log(`[DATE NORMALIZATION] Day name '${req.date}' -> '${normalizedDate}'`);
                             } else {
-                                this.logger.warn(`[DATE NORMALIZATION] Could not parse date: '${req.date}'`);
+                                // Try standard date parsing
+                                const parsedDate = new Date(req.date);
+                                if (!isNaN(parsedDate.getTime())) {
+                                    normalizedDate = parsedDate.toISOString().split('T')[0];
+                                    this.logger.log(`[DATE NORMALIZATION] Parsed '${req.date}' -> '${normalizedDate}'`);
+                                } else {
+                                    this.logger.warn(`[DATE NORMALIZATION] Could not parse date: '${req.date}'`);
+                                }
                             }
                         }
                         
@@ -133,35 +204,51 @@ export class AgentOrchestrator {
                         }
 
                         if (targetSlot) {
+                            // Calculate end time (default 60 mins)
+                            const [hours, minutes] = targetSlot.start_time.split(':').map(Number);
+                            const endHour = hours + 1;
+                            const endTime = `${endHour.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}`;
+
                             await this.pythonAdapter.createBooking({
                                 coach_id: coachId,
                                 player_id: playerId || "determined-from-sender-email", 
-                                booking_date: req.date,
+                                booking_date: normalizedDate,
                                 start_time: targetSlot.start_time,
-                                end_time: "calculated-end",
+                                end_time: endTime,
                                 status: "confirmed"
                             });
 
-                            // Calculate alternatives (excluding the booked slot)
-                            const alternatives = slots ? slots.filter(s => s.is_available && s.start_time !== targetSlot.start_time).slice(0, 2) : [];
-                            const altText = alternatives.length > 0 ? `\n\nOther available times: ${alternatives.map(s => s.start_time).join(', ')}.` : '';
+                            // Calculate alternatives (excluding the booked slot) - show up to 4
+                            const alternatives = slots ? slots.filter(s => s.is_available && s.start_time !== targetSlot.start_time).slice(0, 4) : [];
+                            const altText = alternatives.length > 0 
+                                ? `\n\nAlternative times available for ${normalizedDate}: ${alternatives.map(s => s.start_time).join(', ')}.` 
+                                : '';
 
-                            // Overwrite replyText to strictly use the confirmation message (discarding LLM draft)
-                            replyText = `Hi,\n\nI have booked you for ${req.date} at ${targetSlot.start_time}.${altText}\n\nThanks,\nSquashDaddy Agent`;
+                            // Determine if we had to fall back from their preference
+                            const wasPreferenceMissed = req.time || req.time_range_start;
+                            const fallbackNote = wasPreferenceMissed 
+                                ? `The coach doesn't have availability at your preferred time. ` 
+                                : '';
+
+                            // Overwrite replyText with clear confirmation (discarding LLM draft)
+                            replyText = `Hi,\n\n${fallbackNote}Earliest available slot is ${targetSlot.start_time}. I have created a booking for ${normalizedDate} at ${targetSlot.start_time} to ensure you have a time reserved.${altText}\n\nIf none of these times work, let me know and we can look at different dates.\n\nThanks,\nSquashDaddy Agent`;
                             success = true;
                         } else {
-                            // Suggest alternatives
-                            const alternatives = slots ? slots.filter(s => s.is_available).slice(0, 2) : [];
-                            const altText = alternatives.map(s => s.start_time).join(' or ');
+                            // Suggest alternatives - show more slots
+                            const alternatives = slots ? slots.filter(s => s.is_available).slice(0, 4) : [];
+                            const altText = alternatives.map(s => s.start_time).join(', ');
                             const timeDesc = req.time ? req.time : (req.time_range_start ? `between ${req.time_range_start} and ${req.time_range_end}` : 'that day');
-                            const failMsg = `Sorry, no time available ${timeDesc} on ${req.date}.` + (altText ? ` Try: ${altText}` : '');
-
-                            replyText = replyText ? `${replyText}\n\n${failMsg}` : failMsg;
+                            
+                            // OVERWRITE replyText instead of appending (to avoid conflicting messages)
+                            replyText = `Hi,\n\nSorry, no availability ${timeDesc} on ${normalizedDate}.` + 
+                                (altText ? ` Available times: ${altText}.` : ' No slots available on this date.') +
+                                `\n\nLet me know if you'd like to book one of these times or explore different dates.\n\nThanks,\nSquashDaddy Agent`;
                             success = false;
                         }
-                    }
-                }
-            }
+                    } // close if (req.intent === 'BOOK_LESSON')
+                } // close for loop
+                } // close 'else' block for known player
+            } // close if (BOOK_LESSON || MULTI_INTENT)
 
             // 4. Determine recipient based on admin override
             const recipientEmail = adminOverride?.enabled && adminOverride.email
